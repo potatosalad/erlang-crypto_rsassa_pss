@@ -8,4 +8,6 @@ otp_release:
 notifications:
   email: false
 
-script: "make tests"
+script:
+  - "make tests"
+  - "make triq"
