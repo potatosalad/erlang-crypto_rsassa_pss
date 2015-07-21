@@ -5,3 +5,4 @@
 * Enhancements
   * Initial release.
   * Basic implementation based on https://github.com/vincenthz/hs-crypto-pubkey
+  * Tested with ct and triq.

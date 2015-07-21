@@ -49,11 +49,13 @@ groups() ->
 	].
 
 init_per_suite(Config) ->
+	_ = application:ensure_all_started(cutkey),
 	_ = application:ensure_all_started(crypto_rsassa_pss),
 	Config.
 
 end_per_suite(_Config) ->
 	_ = application:stop(crypto_rsassa_pss),
+	_ = application:stop(cutkey),
 	ok.
 
 init_per_group('512', Config) ->
@@ -117,12 +119,21 @@ gen_keypair(Size) ->
 % 	PrivateKey = gen_private_key(Size),
 % 	make_public(PrivateKey).
 
+% %% @private
+% gen_private_key(Size) ->
+% 	Command = lists:flatten(io_lib:format("openssl genrsa ~w 2>/dev/null", [Size])),
+% 	PEM = os:cmd(Command),
+% 	[PEMEntry | _] = public_key:pem_decode(iolist_to_binary(PEM)),
+% 	public_key:pem_entry_decode(PEMEntry).
+
 %% @private
-gen_private_key(Size) ->
-	Command = lists:flatten(io_lib:format("openssl genrsa ~w 2>/dev/null", [Size])),
-	PEM = os:cmd(Command),
-	[PEMEntry | _] = public_key:pem_decode(iolist_to_binary(PEM)),
-	public_key:pem_entry_decode(PEMEntry).
+gen_private_key(ModulusSize) ->
+	gen_private_key(ModulusSize, 65537).
+
+%% @private
+gen_private_key(ModulusSize, ExponentSize) ->
+	{ok, PrivateKey} = cutkey:rsa(ModulusSize, ExponentSize, [{return,key}]),
+	PrivateKey.
 
 %% @private
 make_public(#'RSAPrivateKey'{modulus=Modulus, publicExponent=PublicExponent}) ->
