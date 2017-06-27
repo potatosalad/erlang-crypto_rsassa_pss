@@ -42,7 +42,7 @@ sign(Message, DigestType, PrivateKey) when is_binary(Message) ->
 	sign({digest, crypto:hash(DigestType, Message)}, DigestType, PrivateKey);
 sign(Message={digest, _}, DigestType, PrivateKey) ->
 	SaltLen = byte_size(crypto:hash(DigestType, <<>>)),
-	Salt = crypto:rand_bytes(SaltLen),
+	Salt = crypto:strong_rand_bytes(SaltLen),
 	sign(Message, DigestType, Salt, PrivateKey).
 
 -spec sign(Message, DigestType, Salt, PrivateKey) -> Signature
