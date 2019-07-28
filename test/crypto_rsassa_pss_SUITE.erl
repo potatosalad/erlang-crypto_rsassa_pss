@@ -14,6 +14,8 @@
 -export([end_per_group/2]).
 
 %% Tests.
+-export([pkcs1_rsassa_pss_sign_and_verify/1]).
+-export([pkcs1_rsassa_pss_sign_and_verify_with_salt/1]).
 -export([sign_and_verify/1]).
 -export([md5/1]).
 -export([sha/1]).
@@ -28,7 +30,8 @@ all() ->
 		{group, '1024'},
 		{group, '2048'},
 		{group, '4096'},
-		{group, '8192'}
+		{group, '8192'},
+		{group, property_test}
 	].
 
 groups() ->
@@ -45,41 +48,56 @@ groups() ->
 		{'1024', [parallel], DigestTypes -- [sha512]},
 		{'2048', [parallel], DigestTypes},
 		{'4096', [parallel], DigestTypes},
-		{'8192', [parallel], DigestTypes}
+		{'8192', [parallel], DigestTypes},
+		{property_test, [parallel], [
+			pkcs1_rsassa_pss_sign_and_verify,
+			pkcs1_rsassa_pss_sign_and_verify_with_salt
+		]}
 	].
 
 init_per_suite(Config) ->
-	_ = application:ensure_all_started(cutkey),
 	_ = application:ensure_all_started(crypto_rsassa_pss),
-	Config.
+	ct_property_test:init_per_suite(Config).
 
 end_per_suite(_Config) ->
 	_ = application:stop(crypto_rsassa_pss),
-	_ = application:stop(cutkey),
 	ok.
 
-init_per_group('512', Config) ->
-	[{keypair, gen_keypair(512)} | Config];
-init_per_group('1024', Config) ->
-	[{keypair, gen_keypair(1024)} | Config];
-init_per_group('2048', Config) ->
-	[{keypair, gen_keypair(2048)} | Config];
-init_per_group('4096', Config) ->
-	[{keypair, gen_keypair(4096)} | Config];
-init_per_group('8192', Config) ->
-	[{keypair, gen_keypair(8192)} | Config].
+init_per_group(G='512', Config) ->
+	[{keypair, rsa_keypair(512)} | crypto_rsassa_pss_ct:start(G, Config)];
+init_per_group(G='1024', Config) ->
+	[{keypair, rsa_keypair(1024)} | crypto_rsassa_pss_ct:start(G, Config)];
+init_per_group(G='2048', Config) ->
+	[{keypair, rsa_keypair(2048)} | crypto_rsassa_pss_ct:start(G, Config)];
+init_per_group(G='4096', Config) ->
+	[{keypair, rsa_keypair(4096)} | crypto_rsassa_pss_ct:start(G, Config)];
+init_per_group(G='8192', Config) ->
+	[{keypair, rsa_keypair(8192)} | crypto_rsassa_pss_ct:start(G, Config)];
+init_per_group(G=property_test, Config) ->
+	crypto_rsassa_pss_ct:start(G, Config).
 
-end_per_group(_Group, _Config) ->
+end_per_group(_Group, Config) ->
+	crypto_rsassa_pss_ct:stop(Config),
 	ok.
 
 %%====================================================================
 %% Tests
 %%====================================================================
 
+pkcs1_rsassa_pss_sign_and_verify(Config) ->
+	ct_property_test:quickcheck(
+		crypto_rsassa_pss_props:prop_rsassa_pss_sign_and_verify(),
+		Config).
+
+pkcs1_rsassa_pss_sign_and_verify_with_salt(Config) ->
+	ct_property_test:quickcheck(
+		crypto_rsassa_pss_props:prop_rsassa_pss_sign_and_verify_with_salt(),
+		Config).
+
 sign_and_verify(Config) ->
 	DigestType = ?config(digest_type, Config),
 	{PrivateKey, PublicKey} = ?config(keypair, Config),
-	Message = crypto:rand_bytes(crypto:rand_uniform(256, 1024)),
+	Message = crypto:strong_rand_bytes(random_uniform(256, 1024)),
 	Signature = crypto_rsassa_pss:sign(Message, DigestType, PrivateKey),
 	NextSignature = crypto_rsassa_pss:sign(Message, DigestType, PrivateKey),
 	false = (Signature =:= NextSignature),
@@ -110,31 +128,18 @@ sha512(Config) ->
 %%%-------------------------------------------------------------------
 
 %% @private
-gen_keypair(Size) ->
-	PrivateKey = gen_private_key(Size),
-	{PrivateKey, make_public(PrivateKey)}.
-
-% %% @private
-% gen_public_key(Size) ->
-% 	PrivateKey = gen_private_key(Size),
-% 	make_public(PrivateKey).
-
-% %% @private
-% gen_private_key(Size) ->
-% 	Command = lists:flatten(io_lib:format("openssl genrsa ~w 2>/dev/null", [Size])),
-% 	PEM = os:cmd(Command),
-% 	[PEMEntry | _] = public_key:pem_decode(iolist_to_binary(PEM)),
-% 	public_key:pem_entry_decode(PEMEntry).
+random_uniform(High) when is_integer(High) andalso High >= 0 ->
+	rand:uniform(High + 1) - 1.
 
 %% @private
-gen_private_key(ModulusSize) ->
-	gen_private_key(ModulusSize, 65537).
+random_uniform(0, High) when is_integer(High) andalso High >= 0 ->
+	random_uniform(High);
+random_uniform(Low, High) when is_integer(Low) andalso Low > 0 andalso is_integer(High) andalso High >= 0 ->
+	rand:uniform(High - Low + 1) + Low - 1.
 
-%% @private
-gen_private_key(ModulusSize, ExponentSize) ->
-	{ok, PrivateKey} = cutkey:rsa(ModulusSize, ExponentSize, [{return,key}]),
-	PrivateKey.
-
-%% @private
-make_public(#'RSAPrivateKey'{modulus=Modulus, publicExponent=PublicExponent}) ->
-	#'RSAPublicKey'{modulus=Modulus, publicExponent=PublicExponent}.
+rsa_keypair(ModulusSize) ->
+	ExponentSize = 65537,
+	case public_key:generate_key({rsa, ModulusSize, ExponentSize}) of
+		PrivateKey=#'RSAPrivateKey'{modulus=Modulus, publicExponent=PublicExponent} ->
+			{PrivateKey, #'RSAPublicKey'{modulus=Modulus, publicExponent=PublicExponent}}
+	end.

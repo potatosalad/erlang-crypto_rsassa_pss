@@ -1,129 +1,418 @@
 %% -*- mode: erlang; tab-width: 4; indent-tabs-mode: 1; st-rulers: [70] -*-
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
-%%% @author Andrew Bennett <andrew@pixid.com>
-%%% @copyright 2014-2015, Andrew Bennett
-%%% @doc
-%%%
+%%% @author Andrew Bennett <potatosaladx@gmail.com>
+%%% @copyright 2014-2019, Andrew Bennett
+%%% @doc PKCS #1: RSA Cryptography Specifications Version 2.1
+%%% See RFC 3447: [https://tools.ietf.org/html/rfc3447]
 %%% @end
-%%% Created :  20 Jul 2015 by Andrew Bennett <andrew@pixid.com>
+%%% Created :  20 Jul 2015 by Andrew Bennett <potatosaladx@gmail.com>
 %%%-------------------------------------------------------------------
 -module(crypto_rsassa_pss).
 
 -include_lib("public_key/include/public_key.hrl").
 
--ifdef(TEST).
--include_lib("triq/include/triq.hrl").
--endif.
-
-%% API
+%% Public API
 -export([sign/3]).
 -export([sign/4]).
 -export([verify/4]).
+-export([verify/5]).
+%% Private API
+-export([emsa_pss_encode/3]).
+-export([emsa_pss_encode/4]).
+-export([emsa_pss_verify/4]).
+-export([emsa_pss_verify/5]).
+-export([mgf1/3]).
+-export([rsassa_pss_sign/3]).
+-export([rsassa_pss_sign/4]).
+-export([rsassa_pss_verify/4]).
+-export([rsassa_pss_verify/5]).
 
 %% Types
+-type rsa_digest_type() :: 'md5' | 'sha' | 'sha224' | 'sha256' | 'sha384' | 'sha512'.
+-type rsa_hash_fun()    :: rsa_digest_type() | {hmac, rsa_digest_type(), iodata()} | fun((iodata()) -> binary()).
 -type rsa_public_key()  :: #'RSAPublicKey'{}.
 -type rsa_private_key() :: #'RSAPrivateKey'{}.
--type rsa_digest_type() :: 'md5' | 'sha' | 'sha224' | 'sha256' | 'sha384' | 'sha512'.
 
 -define(PSS_TRAILER_FIELD, 16#BC).
 
 %%====================================================================
-%% API functions
+%% Public API functions
 %%====================================================================
 
--spec sign(Message, DigestType, PrivateKey) -> Signature
+-spec sign(Message, DigestType, RSAPrivateKey) -> Signature
 	when
-		Message    :: binary() | {digest, binary()},
-		DigestType :: rsa_digest_type() | atom(),
-		PrivateKey :: rsa_private_key(),
-		Signature  :: binary().
-sign(Message, DigestType, PrivateKey) when is_binary(Message) ->
-	sign({digest, crypto:hash(DigestType, Message)}, DigestType, PrivateKey);
-sign(Message={digest, _}, DigestType, PrivateKey) ->
-	SaltLen = byte_size(crypto:hash(DigestType, <<>>)),
-	Salt = crypto:rand_bytes(SaltLen),
-	sign(Message, DigestType, Salt, PrivateKey).
+		Message       :: binary(),
+		DigestType    :: rsa_digest_type(),
+		RSAPrivateKey :: rsa_private_key(),
+		Signature     :: binary().
+sign(Message, DigestType, PrivateKey) ->
+	sign(Message, DigestType, -2, PrivateKey).
 
--spec sign(Message, DigestType, Salt, PrivateKey) -> Signature
+-spec sign(Message, DigestType, Salt, RSAPrivateKey) -> Signature
 	when
-		Message    :: binary() | {digest, binary()},
-		DigestType :: rsa_digest_type() | atom(),
-		Salt       :: binary(),
-		PrivateKey :: rsa_private_key(),
-		Signature  :: binary().
-sign(Message, DigestType, Salt, PrivateKey) when is_binary(Message) ->
-	sign({digest, crypto:hash(DigestType, Message)}, DigestType, Salt, PrivateKey);
-sign({digest, Digest}, DigestType, Salt, PrivateKey=#'RSAPrivateKey'{modulus=N}) ->
-	DigestLen = byte_size(Digest),
+		Message       :: binary(),
+		DigestType    :: rsa_digest_type(),
+		Salt          :: integer() | binary(),
+		RSAPrivateKey :: rsa_private_key(),
+		Signature     :: binary().
+sign(Message, DigestType, Salt, PrivateKey=#'RSAPrivateKey'{}) ->
+	case rsassa_pss_sign(DigestType, Message, Salt, PrivateKey) of
+		{ok, Signature} ->
+			Signature;
+		{error, Reason} ->
+			erlang:error(Reason)
+	end;
+sign(Message, DigestType, Salt, PrivateKey) ->
+	erlang:error(badarg, [Message, DigestType, Salt, PrivateKey]).
+
+-spec verify(Message, DigestType, Signature, RSAPublicKey) -> boolean()
+	when
+		Message      :: binary(),
+		DigestType   :: rsa_digest_type(),
+		Signature    :: binary(),
+		RSAPublicKey :: rsa_public_key().
+verify(Message, DigestType, Signature, PublicKey) ->
+	verify(Message, DigestType, Signature, -2, PublicKey).
+
+-spec verify(Message, DigestType, Signature, Salt, RSAPublicKey) -> boolean()
+	when
+		Message      :: binary(),
+		DigestType   :: rsa_digest_type(),
+		Signature    :: binary(),
+		Salt         :: integer() | binary(),
+		RSAPublicKey :: rsa_public_key().
+verify(Message, DigestType, Signature, Salt, PublicKey=#'RSAPublicKey'{}) ->
+	rsassa_pss_verify(DigestType, Message, Signature, Salt, PublicKey);
+verify(Message, DigestType, Signature, Salt, PublicKey) ->
+	erlang:error(badarg, [Message, DigestType, Signature, Salt, PublicKey]).
+
+%%====================================================================
+%% Private API functions
+%%====================================================================
+
+%% See [https://tools.ietf.org/html/rfc3447#section-9.1.1]
+-spec emsa_pss_encode(Hash, Message, EMBits) -> {ok, EM} | {error, Reason}
+	when
+		Hash    :: rsa_hash_fun(),
+		Message :: binary(),
+		EMBits  :: integer(),
+		EM      :: binary(),
+		Reason  :: term().
+emsa_pss_encode(Hash, Message, EMBits)
+		when is_function(Hash, 1)
+		andalso is_binary(Message)
+		andalso is_integer(EMBits) ->
+	emsa_pss_encode(Hash, Message, -2, EMBits);
+emsa_pss_encode(Hash, Message, EMBits)
+		when is_tuple(Hash)
+		orelse is_atom(Hash) ->
+	HashFun = resolve_hash(Hash),
+	emsa_pss_encode(HashFun, Message, EMBits).
+
+%% See [https://tools.ietf.org/html/rfc3447#section-9.1.1]
+-spec emsa_pss_encode(Hash, Message, Salt, EMBits) -> {ok, EM} | {error, Reason}
+	when
+		Hash    :: rsa_hash_fun(),
+		Message :: binary(),
+		Salt    :: binary() | integer(),
+		EMBits  :: integer(),
+		EM      :: binary(),
+		Reason  :: term().
+emsa_pss_encode(Hash, Message, Salt, EMBits)
+		when is_function(Hash, 1)
+		andalso is_binary(Message)
+		andalso is_binary(Salt)
+		andalso is_integer(EMBits) ->
+	MHash = Hash(Message),
+	HashLen = byte_size(MHash),
 	SaltLen = byte_size(Salt),
-	PublicBitSize = int_to_bit_size(N),
-	PrivateByteSize = PublicBitSize div 8,
-	PublicByteSize = int_to_byte_size(N),
-	case PublicByteSize < (DigestLen + SaltLen + 2) of
+	EMLen = ceiling(EMBits / 8),
+	case EMLen < (HashLen + SaltLen + 2) of
 		false ->
-			DBLen = PrivateByteSize - DigestLen - 1,
-			M = << 0:64, Digest/binary, Salt/binary >>,
-			H = crypto:hash(DigestType, M),
-			DB = << 0:((DBLen - SaltLen - 1) * 8), 1, Salt/binary >>,
-			DBMask = mgf1(DigestType, H, DBLen),
-			MaskedDB = normalize_to_key_size(PublicBitSize, crypto:exor(DB, DBMask)),
-			EM = << MaskedDB/binary, H/binary, ?PSS_TRAILER_FIELD >>,
-			DM = pad_to_key_size(PublicByteSize, dp(EM, PrivateKey)),
-			DM;
+			MPrime = << 0:64, MHash/binary, Salt/binary >>,
+			H = Hash(MPrime),
+			PS = << 0:((EMLen - SaltLen - HashLen - 2) * 8) >>,
+			DB = << PS/binary, 16#01, Salt/binary >>,
+			case mgf1(Hash, H, EMLen - HashLen - 1) of
+				{ok, DBMask} ->
+					LeftBits = (EMLen * 8) - EMBits,
+					<< _:LeftBits/bitstring, MaskedDBRight/bitstring >> = crypto:exor(DB, DBMask),
+					MaskedDB = << 0:LeftBits, MaskedDBRight/bitstring >>,
+					EM = << MaskedDB/binary, H/binary, ?PSS_TRAILER_FIELD >>,
+					{ok, EM};
+				MGF1Error ->
+					MGF1Error
+			end;
 		true ->
-			erlang:error(badarg, [{digest, Digest}, DigestType, Salt, PrivateKey])
-	end.
+			{error, encoding_error}
+	end;
+emsa_pss_encode(Hash, Message, -2, EMBits)
+		when is_function(Hash, 1)
+		andalso is_integer(EMBits) ->
+	HashLen = byte_size(Hash(<<>>)),
+	EMLen = ceiling(EMBits / 8),
+	SaltLen = EMLen - HashLen - 2,
+	case SaltLen < 0 of
+		false ->
+			emsa_pss_encode(Hash, Message, SaltLen, EMBits);
+		true ->
+			{error, encoding_error}
+	end;
+emsa_pss_encode(Hash, Message, -1, EMBits)
+		when is_function(Hash, 1) ->
+	HashLen = byte_size(Hash(<<>>)),
+	SaltLen = HashLen,
+	emsa_pss_encode(Hash, Message, SaltLen, EMBits);
+emsa_pss_encode(Hash, Message, SaltLen, EMBits)
+		when is_integer(SaltLen)
+		andalso SaltLen >= 0 ->
+	Salt = crypto:strong_rand_bytes(SaltLen),
+	emsa_pss_encode(Hash, Message, Salt, EMBits);
+emsa_pss_encode(Hash, Message, Salt, EMBits)
+		when is_tuple(Hash)
+		orelse is_atom(Hash) ->
+	HashFun = resolve_hash(Hash),
+	emsa_pss_encode(HashFun, Message, Salt, EMBits).
 
--spec verify(Message, DigestType, Signature, PublicKey) -> boolean()
+%% See [https://tools.ietf.org/html/rfc3447#section-9.1.2]
+-spec emsa_pss_verify(Hash, Message, EM, EMBits) -> boolean()
 	when
-		Message    :: binary() | {digest, binary()},
-		DigestType :: rsa_digest_type() | atom(),
-		Signature  :: binary(),
-		PublicKey  :: rsa_public_key().
-verify(Message, DigestType, Signature, PublicKey) when is_binary(Message) ->
-	verify({digest, crypto:hash(DigestType, Message)}, DigestType, Signature, PublicKey);
-verify({digest, Digest}, DigestType, Signature, PublicKey=#'RSAPublicKey'{modulus=N}) ->
-	DigestLen = byte_size(Digest),
-	PublicBitSize = int_to_bit_size(N),
-	PrivateByteSize = PublicBitSize div 8,
-	PublicByteSize = int_to_byte_size(N),
-	SignatureSize = byte_size(Signature),
-	case PublicByteSize =:= SignatureSize of
-		true ->
-			DBLen = PrivateByteSize - DigestLen - 1,
-			EM = pad_to_key_size(PrivateByteSize, ep(Signature, PublicKey)),
-			case binary:last(EM) of
-				?PSS_TRAILER_FIELD ->
-					MaskedDB = binary:part(EM, 0, byte_size(EM) - DigestLen - 1),
-					H = binary:part(EM, byte_size(MaskedDB), DigestLen),
-					DBMask = mgf1(DigestType, H, DBLen),
-					DB = normalize_to_key_size(PublicBitSize, crypto:exor(MaskedDB, DBMask)),
-					case binary:match(DB, << 1 >>) of
-						{Pos, Len} ->
-							PS = binary:decode_unsigned(binary:part(DB, 0, Pos)),
-							case PS =:= 0 of
-								true ->
-									Salt = binary:part(DB, Pos + Len, byte_size(DB) - Pos - Len),
-									M = << 0:64, Digest/binary, Salt/binary >>,
-									HOther = crypto:hash(DigestType, M),
-									H =:= HOther;
-								false ->
+		Hash    :: rsa_hash_fun(),
+		Message :: binary(),
+		EM      :: binary(),
+		EMBits  :: integer().
+emsa_pss_verify(Hash, Message, EM, EMBits)
+		when is_function(Hash, 1)
+		andalso is_binary(Message)
+		andalso is_binary(EM)
+		andalso is_integer(EMBits) ->
+	emsa_pss_verify(Hash, Message, EM, -2, EMBits);
+emsa_pss_verify(Hash, Message, EM, EMBits)
+		when is_tuple(Hash)
+		orelse is_atom(Hash) ->
+	HashFun = resolve_hash(Hash),
+	emsa_pss_verify(HashFun, Message, EM, EMBits).
+
+%% See [https://tools.ietf.org/html/rfc3447#section-9.1.2]
+-spec emsa_pss_verify(Hash, Message, EM, SaltLen, EMBits) -> boolean()
+	when
+		Hash    :: rsa_hash_fun(),
+		Message :: binary(),
+		EM      :: binary(),
+		SaltLen :: integer(),
+		EMBits  :: integer().
+emsa_pss_verify(Hash, Message, EM, SaltLen, EMBits)
+		when is_function(Hash, 1)
+		andalso is_binary(Message)
+		andalso is_integer(SaltLen)
+		andalso SaltLen >= 0
+		andalso is_integer(EMBits) ->
+	MHash = Hash(Message),
+	HashLen = byte_size(MHash),
+	EMLen = ceiling(EMBits / 8),
+	MaskedDBLen = (EMLen - HashLen - 1),
+	case {EMLen < (HashLen + SaltLen + 2), byte_size(EM), EM} of
+		{false, EMLen, << MaskedDB:MaskedDBLen/binary, H:HashLen/binary, ?PSS_TRAILER_FIELD >>} ->
+			LeftBits = ((EMLen * 8) - EMBits),
+			case MaskedDB of
+				<< 0:LeftBits, _/bitstring >> ->
+					case mgf1(Hash, H, EMLen - HashLen - 1) of
+						{ok, DBMask} ->
+							<< _:LeftBits/bitstring, DBRight/bitstring >> = crypto:exor(MaskedDB, DBMask),
+							DB = << 0:LeftBits, DBRight/bitstring >>,
+							PSLen = ((EMLen - HashLen - SaltLen - 2) * 8),
+							case DB of
+								<< 0:PSLen, 16#01, Salt:SaltLen/binary >> ->
+									MPrime = << 0:64, MHash/binary, Salt/binary >>,
+									HPrime = Hash(MPrime),
+									H =:= HPrime;
+								_BadDB ->
 									false
 							end;
-						nomatch ->
+						_MGF1Error ->
 							false
 					end;
-				_BadTrailer ->
+				_BadMaskedDB ->
 					false
 			end;
+		_BadEMLen ->
+			false
+	end;
+emsa_pss_verify(Hash, Message, EM, -2, EMBits)
+		when is_function(Hash, 1)
+		andalso is_integer(EMBits) ->
+	HashLen = byte_size(Hash(<<>>)),
+	EMLen = ceiling(EMBits / 8),
+	SaltLen = EMLen - HashLen - 2,
+	case SaltLen < 0 of
+		false ->
+			emsa_pss_verify(Hash, Message, EM, SaltLen, EMBits);
+		true ->
+			false
+	end;
+emsa_pss_verify(Hash, Message, EM, -1, EMBits)
+		when is_function(Hash, 1) ->
+	HashLen = byte_size(Hash(<<>>)),
+	SaltLen = HashLen,
+	emsa_pss_verify(Hash, Message, EM, SaltLen, EMBits).
+
+%% See [https://tools.ietf.org/html/rfc3447#appendix-B.2]
+-spec mgf1(Hash, Seed, MaskLen) -> {ok, binary()} | {error, mask_too_long}
+	when
+		Hash    :: rsa_hash_fun(),
+		Seed    :: binary(),
+		MaskLen :: pos_integer().
+mgf1(Hash, Seed, MaskLen)
+		when is_function(Hash, 1)
+		andalso is_binary(Seed)
+		andalso is_integer(MaskLen)
+		andalso MaskLen >= 0 ->
+	HashLen = byte_size(Hash(<<>>)),
+	case MaskLen > (16#FFFFFFFF * HashLen) of
+		false ->
+			Reps = ceiling(MaskLen / HashLen),
+			{ok, derive_mgf1(Hash, 0, Reps, Seed, MaskLen, <<>>)};
+		true ->
+			{error, mask_too_long}
+	end;
+mgf1(Hash, Seed, MaskLen)
+		when is_tuple(Hash)
+		orelse is_atom(Hash) ->
+	HashFun = resolve_hash(Hash),
+	mgf1(HashFun, Seed, MaskLen).
+
+%% See [https://tools.ietf.org/html/rfc3447#section-8.1.1]
+-spec rsassa_pss_sign(Hash, Message, RSAPrivateKey) -> {ok, Signature} | {error, Reason}
+	when
+		Hash          :: rsa_hash_fun(),
+		Message       :: binary(),
+		RSAPrivateKey :: rsa_private_key(),
+		Signature     :: binary(),
+		Reason        :: term().
+rsassa_pss_sign(Hash, Message, RSAPrivateKey=#'RSAPrivateKey'{modulus=Modulus})
+		when is_function(Hash, 1)
+		andalso is_binary(Message) ->
+	ModBits = int_to_bit_size(Modulus),
+	case emsa_pss_encode(Hash, Message, ModBits - 1) of
+		{ok, EM} ->
+			ModBytes = int_to_byte_size(Modulus),
+			S = pad_to_key_size(ModBytes, dp(EM, RSAPrivateKey)),
+			{ok, S};
+		EncodingError ->
+			EncodingError
+	end;
+rsassa_pss_sign(Hash, Message, RSAPrivateKey=#'RSAPrivateKey'{})
+		when is_tuple(Hash)
+		orelse is_atom(Hash) ->
+	HashFun = resolve_hash(Hash),
+	rsassa_pss_sign(HashFun, Message, RSAPrivateKey).
+
+%% See [https://tools.ietf.org/html/rfc3447#section-8.1.1]
+-spec rsassa_pss_sign(Hash, Message, Salt, RSAPrivateKey) -> {ok, Signature} | {error, Reason}
+	when
+		Hash          :: rsa_hash_fun(),
+		Message       :: binary(),
+		Salt          :: binary() | integer(),
+		RSAPrivateKey :: rsa_private_key(),
+		Signature     :: binary(),
+		Reason        :: term().
+rsassa_pss_sign(Hash, Message, Salt, RSAPrivateKey=#'RSAPrivateKey'{modulus=Modulus})
+		when is_function(Hash, 1)
+		andalso is_binary(Message)
+		andalso (is_binary(Salt) orelse is_integer(Salt)) ->
+	ModBits = int_to_bit_size(Modulus),
+	case emsa_pss_encode(Hash, Message, Salt, ModBits - 1) of
+		{ok, EM} ->
+			ModBytes = int_to_byte_size(Modulus),
+			S = pad_to_key_size(ModBytes, dp(EM, RSAPrivateKey)),
+			{ok, S};
+		EncodingError ->
+			EncodingError
+	end;
+rsassa_pss_sign(Hash, Message, Salt, RSAPrivateKey=#'RSAPrivateKey'{})
+		when is_tuple(Hash)
+		orelse is_atom(Hash) ->
+	HashFun = resolve_hash(Hash),
+	rsassa_pss_sign(HashFun, Message, Salt, RSAPrivateKey).
+
+%% See [https://tools.ietf.org/html/rfc3447#section-8.1.2]
+-spec rsassa_pss_verify(Hash, Message, Signature, RSAPublicKey) -> boolean()
+	when
+		Hash         :: rsa_hash_fun(),
+		Message      :: binary(),
+		Signature    :: binary(),
+		RSAPublicKey :: rsa_public_key().
+rsassa_pss_verify(Hash, Message, Signature, RSAPublicKey=#'RSAPublicKey'{modulus=Modulus})
+		when is_function(Hash, 1)
+		andalso is_binary(Message)
+		andalso is_binary(Signature) ->
+	ModBytes = int_to_byte_size(Modulus),
+	case byte_size(Signature) =:= ModBytes of
+		true ->
+			ModBits = int_to_bit_size(Modulus),
+			EM = pad_to_key_size(ceiling((ModBits - 1) / 8), ep(Signature, RSAPublicKey)),
+			emsa_pss_verify(Hash, Message, EM, ModBits - 1);
 		false ->
 			false
-	end.
+	end;
+rsassa_pss_verify(Hash, Message, Signature, RSAPublicKey=#'RSAPublicKey'{})
+		when is_tuple(Hash)
+		orelse is_atom(Hash) ->
+	HashFun = resolve_hash(Hash),
+	rsassa_pss_verify(HashFun, Message, Signature, RSAPublicKey).
+
+%% See [https://tools.ietf.org/html/rfc3447#section-8.1.2]
+-spec rsassa_pss_verify(Hash, Message, Signature, SaltLen, RSAPublicKey) -> boolean()
+	when
+		Hash         :: rsa_hash_fun(),
+		Message      :: binary(),
+		Signature    :: binary(),
+		SaltLen      :: integer(),
+		RSAPublicKey :: rsa_public_key().
+rsassa_pss_verify(Hash, Message, Signature, SaltLen, RSAPublicKey=#'RSAPublicKey'{modulus=Modulus})
+		when is_function(Hash, 1)
+		andalso is_binary(Message)
+		andalso is_binary(Signature)
+		andalso is_integer(SaltLen) ->
+	ModBytes = int_to_byte_size(Modulus),
+	case byte_size(Signature) =:= ModBytes of
+		true ->
+			ModBits = int_to_bit_size(Modulus),
+			EM = pad_to_key_size(ceiling((ModBits - 1) / 8), ep(Signature, RSAPublicKey)),
+			emsa_pss_verify(Hash, Message, EM, SaltLen, ModBits - 1);
+		false ->
+			false
+	end;
+rsassa_pss_verify(Hash, Message, Signature, SaltLen, RSAPublicKey=#'RSAPublicKey'{})
+		when is_tuple(Hash)
+		orelse is_atom(Hash) ->
+	HashFun = resolve_hash(Hash),
+	rsassa_pss_verify(HashFun, Message, Signature, SaltLen, RSAPublicKey).
 
 %%%-------------------------------------------------------------------
 %%% Internal functions
 %%%-------------------------------------------------------------------
+
+%% @private
+ceiling(X) when X < 0 ->
+	trunc(X);
+ceiling(X) ->
+	T = trunc(X),
+	case X - T == 0 of
+		false ->
+			T + 1;
+		true ->
+			T
+	end.
+
+%% @private
+derive_mgf1(_Hash, Reps, Reps, _Seed, MaskLen, T) ->
+	binary:part(T, 0, MaskLen);
+derive_mgf1(Hash, Counter, Reps, Seed, MaskLen, T) ->
+	CounterBin = << Counter:8/unsigned-big-integer-unit:4 >>,
+	NewT = << T/binary, (Hash(<< Seed/binary, CounterBin/binary >>))/binary >>,
+	derive_mgf1(Hash, Counter + 1, Reps, Seed, MaskLen, NewT).
 
 %% @private
 dp(B, #'RSAPrivateKey'{modulus=N, privateExponent=E}) ->
@@ -154,86 +443,19 @@ int_to_byte_size(I, B) ->
 	int_to_byte_size(I bsr 8, B + 1).
 
 %% @private
-mgf1(DigestType, Seed, Len) ->
-	mgf1(DigestType, Seed, Len, <<>>, 0).
-
-%% @private
-mgf1(_DigestType, _Seed, Len, T, _Counter) when byte_size(T) >= Len ->
-	binary:part(T, 0, Len);
-mgf1(DigestType, Seed, Len, T, Counter) ->
-	CounterBin = << Counter:8/unsigned-big-integer-unit:4 >>,
-	NewT = << T/binary, (crypto:hash(DigestType, << Seed/binary, CounterBin/binary >>))/binary >>,
-	mgf1(DigestType, Seed, Len, NewT, Counter + 1).
-
-%% @private
-normalize_to_key_size(_, <<>>) ->
-	<<>>;
-normalize_to_key_size(Bits, _A = << C, Rest/binary >>) ->
-	SH = (Bits - 1) band 16#7,
-	Mask = case SH > 0 of
-		false ->
-			16#FF;
-		true ->
-			16#FF bsr (8 - SH)
-	end,
-	B = << (C band Mask), Rest/binary >>,
-	B.
-
-%% @private
 pad_to_key_size(Bytes, Data) when byte_size(Data) < Bytes ->
 	pad_to_key_size(Bytes, << 0, Data/binary >>);
 pad_to_key_size(_Bytes, Data) ->
 	Data.
 
-%%%-------------------------------------------------------------------
-%%% Test functions
-%%%-------------------------------------------------------------------
-
--ifdef(TEST).
-
-digest_type()   -> oneof([md5, sha, sha224, sha256, sha384, sha512]).
-salt_size()     -> non_neg_integer().
-modulus_size()  -> int(256, 2048). % int(256, 8192) | pos_integer().
-exponent_size() -> return(65537).  % pos_integer().
-
-rsa_keypair(ModulusSize) ->
-	?LET(ExponentSize,
-		exponent_size(),
-		begin
-			{ok, PrivateKey=#'RSAPrivateKey'{modulus=Modulus, publicExponent=PublicExponent}} = cutkey:rsa(ModulusSize, ExponentSize, [{return, key}]),
-			{PrivateKey, #'RSAPublicKey'{modulus=Modulus, publicExponent=PublicExponent}}
-		end).
-
-signer_gen() ->
-	?LET({DigestType, ModulusSize},
-		?SUCHTHAT({DigestType, ModulusSize},
-			{digest_type(), modulus_size()},
-			ModulusSize >= (bit_size(crypto:hash(DigestType, <<>>)) * 2 + 16)),
-		{rsa_keypair(ModulusSize), ModulusSize, DigestType, binary()}).
-
-signer_with_salt_gen() ->
-	?LET({DigestType, ModulusSize, SaltSize},
-		?SUCHTHAT({DigestType, ModulusSize, SaltSize},
-			{digest_type(), modulus_size(), salt_size()},
-			ModulusSize >= (bit_size(crypto:hash(DigestType, <<>>)) + (SaltSize * 8) + 16)),
-		{rsa_keypair(ModulusSize), ModulusSize, DigestType, binary(SaltSize), binary()}).
-
-prop_sign_and_verify() ->
-	_ = application:ensure_all_started(cutkey),
-	?FORALL({{PrivateKey, PublicKey}, _, DigestType, Message},
-		signer_gen(),
-		begin
-			Signature = sign(Message, DigestType, PrivateKey),
-			verify(Message, DigestType, Signature, PublicKey)
-		end).
-
-prop_sign_and_verify_with_salt() ->
-	_ = application:ensure_all_started(cutkey),
-	?FORALL({{PrivateKey, PublicKey}, _, DigestType, Salt, Message},
-		signer_with_salt_gen(),
-		begin
-			Signature = sign(Message, DigestType, Salt, PrivateKey),
-			verify(Message, DigestType, Signature, PublicKey)
-		end).
-
--endif.
+%% @private
+resolve_hash(HashFun) when is_function(HashFun, 1) ->
+	HashFun;
+resolve_hash(DigestType) when is_atom(DigestType) ->
+	fun(Data) ->
+		crypto:hash(DigestType, Data)
+	end;
+resolve_hash({hmac, DigestType, Key}) when is_atom(DigestType) ->
+	fun(Data) ->
+		crypto:hmac(DigestType, Key, Data)
+	end.

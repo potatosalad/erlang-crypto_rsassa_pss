@@ -1,23 +1,34 @@
-crypto_rsassa_pss
-=================
+# crypto_rsassa_pss
 
-[![Build Status](https://travis-ci.org/potatosalad/erlang-crypto_rsassa_pss.png?branch=master)](https://travis-ci.org/potatosalad/erlang-crypto_rsassa_pss)
+[![Build Status](https://travis-ci.org/potatosalad/erlang-crypto_rsassa_pss.svg?branch=master)](https://travis-ci.org/potatosalad/erlang-crypto_rsassa_pss) [![Hex.pm](https://img.shields.io/hexpm/v/crypto_rsassa_pss.svg)](https://hex.pm/packages/crypto_rsassa_pss)
 
-RSASSA-PSS Public Key Cryptographic Signature Algorithm for Erlang.
+RSASSA-PSS Public Key Cryptographic Signature Algorithm for Erlang and Elixir.
 
 Implemented closely after the [crypto-pubkey](https://github.com/vincenthz/hs-crypto-pubkey) project for Haskell.
 
 See [RFC #3447](https://tools.ietf.org/html/rfc3447) and [RFC #4506](https://tools.ietf.org/html/rfc4056).
 
-Build
------
+## Installation
 
-```bash
-$ make
+Add `crypto_rsassa_pss` to your project's dependencies in `mix.exs`
+
+```elixir
+defp deps do
+  [
+    {:crypto_rsassa_pss, "~> 2.0.0"}
+  ]
+end
 ```
 
-Usage
------
+Add `crypto_rsassa_pss` to your project's dependencies in your `Makefile` for [`erlang.mk`](https://github.com/ninenines/erlang.mk) or the following to your `rebar.config`
+
+```erlang
+{deps, [
+  {crypto_rsassa_pss, ".*", {git, "git://github.com/potatosalad/erlang-crypto_rsassa_pss.git", {branch, "master"}}}
+]}.
+```
+
+## Usage
 
 First, let's generate a RSA key using `openssl`.
 

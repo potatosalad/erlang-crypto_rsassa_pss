@@ -1,8 +1,8 @@
 %% -*- mode: erlang; tab-width: 4; indent-tabs-mode: 1; st-rulers: [70] -*-
 %% vim: ts=4 sw=4 ft=erlang noet
 {application, crypto_rsassa_pss, [
-	{description, "RSASSA-PSS Public Key Cryptographic Signature Algorithm for Erlang"},
-	{vsn, "1.0.0"},
+	{description, "RSASSA-PSS Public Key Cryptographic Signature Algorithm for Erlang and Elixir."},
+	{vsn, "2.0.0"},
 	{id, "git"},
 	{registered, []},
 	{applications, [
@@ -13,8 +13,7 @@
 		public_key
 	]},
 	{modules, []},
-	{contributors, ["Andrew Bennett"]},
-	{licenses, ["Mozilla Public License Version 2.0"]},
+	{licenses, ["MIT"]},
 	{links, [{"Github", "https://github.com/potatosalad/erlang-crypto_rsassa_pss"}]}
 ]}.
 
